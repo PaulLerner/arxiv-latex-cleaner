@@ -25,6 +25,7 @@ import tempfile
 
 from PIL import Image
 import regex
+import re
 
 PDF_RESIZE_COMMAND = (
     'gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dNOPAUSE -dQUIET -dBATCH '
@@ -702,11 +703,11 @@ def _split_all_files(parameters):
   ]
   file_splits['to_copy_in_root'] = _remove_pattern(
       file_splits['in_root'],
-      parameters['to_delete'] + parameters['figures_to_copy_if_referenced'],
+      parameters['to_delete'] + parameters['figures_to_copy_if_referenced'] + parameters['bib_files'],
   )
   file_splits['to_copy_not_in_root'] = _remove_pattern(
       file_splits['not_in_root'],
-      parameters['to_delete'] + parameters['figures_to_copy_if_referenced'],
+      parameters['to_delete'] + parameters['figures_to_copy_if_referenced'] + parameters['bib_files'],
   )
   file_splits['figures'] = _keep_pattern(
       file_splits['all'], parameters['figures_to_copy_if_referenced']
@@ -717,6 +718,10 @@ def _split_all_files(parameters):
   )
   file_splits['tex_not_in_root'] = _keep_pattern(
       file_splits['to_copy_not_in_root'], ['.tex$', '.tikz$']
+  )
+
+  file_splits['bib_files'] = _keep_pattern(
+      file_splits['all'], parameters['bib_files']
   )
 
   file_splits['non_tex_in_root'] = _remove_pattern(
@@ -751,6 +756,16 @@ def _create_out_folder(input_folder):
   return out_folder
 
 
+def clean_bib(bib):
+  # preproc: remove escaped tex commands
+  bib = re.sub(r"{\\\w+}|\\{|\\}", "", bib)
+
+  # remove keywords and note fields
+  # matches all characters until closing curly bracket "}", optionally followed by a comma ","
+  bib = re.sub(r"\b(keywords|(an)?note) ?= ?{[^}]+},?", "", bib)
+  return bib
+
+
 def run_arxiv_cleaner(parameters):
   """Core of the code, runs the actual arXiv cleaner."""
 
@@ -778,11 +793,9 @@ def run_arxiv_cleaner(parameters):
       r'\.fdb_latexmk$',
   ]
 
-  if not parameters['keep_bib']:
-    files_to_delete.append(r'\.bib$')
-
   parameters.update({
       'to_delete': files_to_delete,
+      'bib_files': [r'\.bib$'],
       'figures_to_copy_if_referenced': [
           r'\.png$',
           r'\.jpg$',
@@ -813,6 +826,12 @@ def run_arxiv_cleaner(parameters):
         splits['tex_in_root'] + splits['tex_not_in_root'], parameters
     )
 
+    logging.info('Reading all bib files')
+    bib_contents = {}
+    for path in splits["bib_files"]:
+      with open(os.path.join(parameters['input_folder'], path), 'rt') as file:
+        bib_contents[path] = file.read()
+
     for tex_file in tex_contents:
       logging.info('Removing comments in file %s.', tex_file)
       tex_contents[tex_file] = _remove_comments_and_commands_to_delete(
@@ -834,6 +853,10 @@ def run_arxiv_cleaner(parameters):
       # '\n', so we remove it.
       tex_contents[tex_file] = content.split('\n')
 
+    for path, bib in bib_contents.items():
+      logging.info('Cleaning bib in file %s.', path)
+      bib_contents[path] = clean_bib(bib)
+
     _keep_only_referenced_tex(tex_contents, splits)
     _add_root_tex_files(splits)
 
@@ -850,6 +873,12 @@ def run_arxiv_cleaner(parameters):
           content,
           new_path,
       )
+
+    for path, bib in bib_contents.items():
+      new_path = os.path.join(parameters['output_folder'], path)
+      logging.info('Writing modified bib to %s.', new_path)
+      with open(new_path, 'wt') as file:
+        file.write(bib)
 
     full_content = '\n'.join(
         ''.join(tex_contents[fn]) for fn in splits['tex_to_copy']
